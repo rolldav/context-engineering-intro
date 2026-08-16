@@ -15,6 +15,14 @@ COOKIE_ENCRYPTION_KEY=<your cookie cookie encryption key>
 # For production, use Hyperdrive: https://developers.cloudflare.com/hyperdrive/
 DATABASE_URL=postgresql://username:password@localhost:5432/database_name
 
+# Required, distinct PostgreSQL credential whose role cannot write. There is no
+# fallback to DATABASE_URL; listTables and queryDatabase fail closed without it.
+READ_ONLY_DATABASE_URL=postgresql://readonly_username:password@localhost:5432/database_name
+
+# Optional deployment-owned policy. Comma-separated GitHub logins receive a
+# database:write claim at authorization time. Missing or malformed means no writers.
+# DATABASE_WRITE_GITHUB_LOGINS=approved-login-1,approved-login-2
+
 # Optional: Add Sentry DSN for local development monitoring
 # Get your DSN from https://sentry.io/settings/projects/your-project/keys/
 # Create a new project in Sentry, then for the platform pick Cloudflare Workers (search in the top right)

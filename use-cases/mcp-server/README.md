@@ -29,11 +29,11 @@ cd my-mcp-server-project
 # Install dependencies
 npm install
 
-# Install Wrangler CLI globally
-npm install -g wrangler
+# Authenticate with Cloudflare using the project-local Wrangler CLI
+npm exec -- wrangler login
 
-# Authenticate with Cloudflare
-wrangler login
+# If the localhost callback is blocked, use the device authorization flow
+npm exec -- wrangler login --device
 ```
 
 **What copy_template.py does:**
@@ -118,7 +118,9 @@ cp .dev.vars.example .dev.vars
 
 # Edit .dev.vars with your credentials
 # - GitHub OAuth app credentials
-# - Database connection string
+# - DATABASE_URL using the privileged database role
+# - READ_ONLY_DATABASE_URL using a distinct PostgreSQL read-only role (required)
+# - Optional DATABASE_WRITE_GITHUB_LOGINS deployment allowlist (missing = no writers)
 # - Cookie encryption key
 ```
 
@@ -126,14 +128,14 @@ cp .dev.vars.example .dev.vars
 
 ```bash
 # Test locally
-wrangler dev --config <your wrangler config (.jsonc)>
+npm exec -- wrangler dev --config <your wrangler config (.jsonc)>
 
 # Test with MCP Inspector
 npx @modelcontextprotocol/inspector@latest
 # Connect to: http://localhost:8792/mcp
 
 # Deploy to production
-wrangler deploy
+npm exec -- wrangler deploy
 ```
 
 ## 🏗️ MCP-Specific Context Engineering
@@ -176,11 +178,9 @@ This template provides a complete, production-ready MCP server with:
 src/
 ├── index.ts                 # Main authenticated MCP server
 ├── index_sentry.ts         # Version with Sentry monitoring
-├── simple-math.ts          # Basic MCP example (no auth)
-├── github-handler.ts       # Complete GitHub OAuth implementation
-├── database.ts             # PostgreSQL with security patterns
-├── utils.ts                # OAuth helpers and utilities
-├── workers-oauth-utils.ts  # HMAC-signed cookie system
+├── auth/                    # GitHub OAuth, PKCE and per-flow cookies
+├── durable-objects/        # Strongly consistent one-time OAuth state
+├── database/               # PostgreSQL with security patterns
 └── tools/                  # Modular tool registration system
     └── register-tools.ts   # Central tool registry
 ```
@@ -195,6 +195,7 @@ The `examples/` folder shows how to create MCP tools:
 ### Key Features
 
 - **🔐 GitHub OAuth** - Complete authentication flow with role-based access
+- **🛡️ OAuth 2.1 defaults** - S256 PKCE, atomically consumed Durable Object state, per-flow CSRF-bound cookies, and no upstream token persistence
 - **🗄️ Database Integration** - PostgreSQL with connection pooling and security
 - **🛠️ Modular Tools** - Clean separation of concerns with central registration
 - **☁️ Cloudflare Workers** - Global edge deployment with Durable Objects

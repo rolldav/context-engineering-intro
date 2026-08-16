@@ -14,25 +14,31 @@
     "test:run": "vitest run"
   },
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.0.5",
-    "@modelcontextprotocol/sdk": "1.13.1",
-    "@sentry/cloudflare": "^9.16.0",
-    "agents": "^0.0.100",
-    "hono": "^4.8.3",
+    "@cloudflare/workers-oauth-provider": "0.10.3",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "@sentry/cloudflare": "10.70.0",
+    "agents": "0.20.1",
+    "hono": "4.13.2",
     "just-pick": "^4.2.0",
-    "octokit": "^5.0.3",
-    "postgres": "^3.4.5",
-    "workers-mcp": "^0.0.13",
-    "zod": "^3.25.67"
+    "octokit": "5.0.5",
+    "postgres": "3.4.9",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.8.53",
-    "@types/node": "^24.0.10",
-    "@vitest/ui": "^3.2.4",
-    "prettier": "^3.6.2",
+    "@types/node": "24.13.3",
+    "@vitest/ui": "4.1.10",
+    "prettier": "3.9.6",
     "typescript": "^5.8.3",
     "vi-fetch": "^0.8.0",
-    "vitest": "^3.2.4",
-    "wrangler": "^4.23.0"
+    "vite": "8.2.1",
+    "vitest": "4.1.10",
+    "wrangler": "4.123.0"
+  },
+  "overrides": {
+    "flatted": "3.4.4",
+    "nanoid@^3.3.8": "3.3.18",
+    "nanoid@^5.1.5": "5.1.16"
   }
 }

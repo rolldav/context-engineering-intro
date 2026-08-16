@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { validateSqlQuery, isWriteOperation, formatDatabaseError } from '../../../src/database/security'
+import { validateReadOnlySqlQuery, validateSqlQuery, isWriteOperation } from '../../../src/database/security'
 import {
   validSelectQuery,
   validInsertQuery,
@@ -38,29 +38,29 @@ describe('Database Security', () => {
       expect(result.error).toBe('SQL query cannot be empty')
     })
 
-    it('should reject dangerous DROP queries', () => {
+    it('should allow a single privileged DROP statement for the separately authorized write tool', () => {
       const result = validateSqlQuery(dangerousDropQuery)
-      expect(result.isValid).toBe(false)
-      expect(result.error).toBe('Query contains potentially dangerous SQL patterns')
+      expect(result.isValid).toBe(true)
+      expect(isWriteOperation(dangerousDropQuery)).toBe(true)
     })
 
     it('should reject dangerous DELETE ALL queries', () => {
       const result = validateSqlQuery(dangerousDeleteAllQuery)
       expect(result.isValid).toBe(false)
-      expect(result.error).toBe('Query contains potentially dangerous SQL patterns')
+      expect(result.error).toBe('Only one SQL statement is allowed')
     })
 
     it('should reject SQL injection attempts', () => {
       const result = validateSqlQuery(maliciousInjectionQuery)
       expect(result.isValid).toBe(false)
-      expect(result.error).toBe('Query contains potentially dangerous SQL patterns')
+      expect(result.error).toBe('Only one SQL statement is allowed')
     })
 
     it('should handle case-insensitive dangerous patterns', () => {
       const upperCaseQuery = 'SELECT * FROM users; DROP TABLE users;'
       const result = validateSqlQuery(upperCaseQuery)
       expect(result.isValid).toBe(false)
-      expect(result.error).toBe('Query contains potentially dangerous SQL patterns')
+      expect(result.error).toBe('Only one SQL statement is allowed')
     })
   })
 
@@ -97,39 +97,30 @@ describe('Database Security', () => {
     })
   })
 
-  describe('formatDatabaseError', () => {
-    it('should format generic database errors', () => {
-      const error = new Error('Connection failed')
-      const result = formatDatabaseError(error)
-      expect(result).toBe('Database error: Connection failed')
+  describe('validateReadOnlySqlQuery', () => {
+    it.each([
+      'WITH changed AS (DELETE FROM users RETURNING *) SELECT * FROM changed',
+      'WITH changed AS (UPDATE users SET name = \'x\' RETURNING *) SELECT * FROM changed',
+      'WITH changed AS (INSERT INTO users(name) VALUES (\'x\') RETURNING *) SELECT * FROM changed',
+      'WITH source AS (SELECT 1) DELETE FROM users USING source',
+      'EXPLAIN ANALYZE DELETE FROM users',
+      'SELECT * FROM users; DELETE FROM users',
+      'SELECT * FROM users /* harmless */; -- hidden\n UPDATE users SET name = \'x\'',
+      'SELECT nextval(\'users_id_seq\')',
+    ])('rejects write or side-effect bypass: %s', (sql) => {
+      expect(validateReadOnlySqlQuery(sql).isValid).toBe(false)
+      expect(isWriteOperation(sql)).toBe(true)
     })
 
-    it('should sanitize password errors', () => {
-      const error = new Error('authentication failed for user "test" with password "secret123"')
-      const result = formatDatabaseError(error)
-      expect(result).toBe('Database authentication failed. Please check your credentials.')
-    })
-
-    it('should handle timeout errors', () => {
-      const error = new Error('Connection timeout after 30 seconds')
-      const result = formatDatabaseError(error)
-      expect(result).toBe('Database connection timed out. Please try again.')
-    })
-
-    it('should handle connection errors', () => {
-      const error = new Error('Could not connect to database server')
-      const result = formatDatabaseError(error)
-      expect(result).toBe('Unable to connect to database. Please check your connection string.')
-    })
-
-    it('should handle non-Error objects', () => {
-      const result = formatDatabaseError('string error')
-      expect(result).toBe('An unknown database error occurred.')
-    })
-
-    it('should handle null/undefined errors', () => {
-      expect(formatDatabaseError(null)).toBe('An unknown database error occurred.')
-      expect(formatDatabaseError(undefined)).toBe('An unknown database error occurred.')
+    it.each([
+      'SELECT * FROM users',
+      'SELECT \'; not a statement\' AS value',
+      'WITH visible AS (SELECT id FROM users) SELECT * FROM visible',
+      'WITH values_cte AS (VALUES (1), (2)) SELECT * FROM values_cte;',
+    ])('accepts one read-only statement: %s', (sql) => {
+      expect(validateReadOnlySqlQuery(sql)).toEqual({ isValid: true })
+      expect(isWriteOperation(sql)).toBe(false)
     })
   })
+
 })

@@ -17,11 +17,24 @@ export async function withDatabase<T>(
 		console.log(`Database operation completed successfully in ${duration}ms`);
 		return result;
 	} catch (error) {
-		const duration = Date.now() - startTime;
-		console.error(`Database operation failed after ${duration}ms:`, error);
-		// Re-throw the error so it can be caught by Sentry in the calling code
+		// Do not log database errors here: Postgres error objects can contain raw
+		// SQL, parameters and row data. The caller may emit a separately scrubbed
+		// generic signal before returning a client-safe error.
 		throw error;
 	}
 	// Note: With PostgreSQL connection pooling, we don't close individual connections
 	// They're returned to the pool automatically. The pool is closed when the Durable Object shuts down.
+}
+
+/**
+ * Execute through a dedicated read-only database credential and a PostgreSQL
+ * READ ONLY transaction. The caller must never pass DATABASE_URL here.
+ */
+export async function withReadOnlyDatabase<T>(
+	databaseUrl: string,
+	operation: (db: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+	if (!databaseUrl) throw new Error("READ_ONLY_DATABASE_URL is required");
+	const db = getDb(databaseUrl);
+	return await db.begin("read only", async (transaction) => operation(transaction)) as T;
 }

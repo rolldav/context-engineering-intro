@@ -3,66 +3,88 @@ import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
 import { Octokit } from "octokit";
 import type { Props, ExtendedEnv } from "../types";
+import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl } from "./upstream-oauth";
 import {
-	clientIdAlreadyApproved,
-	parseRedirectApproval,
-	renderApprovalDialog,
-	fetchUpstreamAuthToken,
-	getUpstreamAuthorizeUrl,
-} from "./oauth-utils";
+	authorizationErrorResponse,
+	consumeConsent,
+	consumeUpstreamState,
+	createConsent,
+	createUpstreamState,
+	isClientApproved,
+	renderConsent,
+	validateRequestedScopes,
+} from "./oauth-security";
 const app = new Hono<{ Bindings: ExtendedEnv }>();
 
+function isValidGitHubLogin(login: string): boolean {
+	return (
+		login.length >= 1 &&
+		login.length <= 39 &&
+		/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(login) &&
+		!login.includes("--")
+	);
+}
+
+/**
+ * Convert a deployment-owned allowlist into an application permission claim.
+ * A missing, empty, or malformed setting fails closed and grants no write access.
+ */
+export function permissionsForGitHubLogin(
+	login: string,
+	configuredLogins: string | undefined,
+): Props["permissions"] {
+	if (!isValidGitHubLogin(login) || !configuredLogins?.trim()) return [];
+	const entries = configuredLogins.split(",").map((entry) => entry.trim());
+	if (entries.some((entry) => !isValidGitHubLogin(entry))) return [];
+	const normalizedLogin = login.toLowerCase();
+	return entries.some((entry) => entry.toLowerCase() === normalizedLogin) ? ["database:write"] : [];
+}
+
 app.get("/authorize", async (c) => {
-	const oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
+	let oauthReqInfo: AuthRequest;
+	try {
+		oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
+		validateRequestedScopes(oauthReqInfo);
+	} catch (error) {
+		return authorizationErrorResponse(error);
+	}
 	const { clientId } = oauthReqInfo;
-	if (!clientId) {
-		return c.text("Invalid request", 400);
+
+	if (await isClientApproved(c.req.raw, clientId, c.env.COOKIE_ENCRYPTION_KEY)) {
+		return redirectToGithub(c.req.raw, oauthReqInfo, c.env);
 	}
 
-	if (
-		await clientIdAlreadyApproved(c.req.raw, oauthReqInfo.clientId, (c.env as any).COOKIE_ENCRYPTION_KEY)
-	) {
-		return redirectToGithub(c.req.raw, oauthReqInfo, c.env, {});
-	}
-
-	return renderApprovalDialog(c.req.raw, {
+	const consent = await createConsent(c.env.OAUTH_STATE, oauthReqInfo);
+	const response = renderConsent(c.req.raw, {
 		client: await c.env.OAUTH_PROVIDER.lookupClient(clientId),
-		server: {
-			description: "This is a demo MCP Remote Server using GitHub for authentication.",
-			logo: "https://avatars.githubusercontent.com/u/314135?s=200&v=4",
-			name: "Cloudflare GitHub MCP Server", // optional
-		},
-		state: { oauthReqInfo }, // arbitrary data that flows through the form submission below
+		description: "This is a demo MCP Remote Server using GitHub for authentication.",
+		serverName: "Cloudflare GitHub MCP Server",
+		token: consent.token,
 	});
+	response.headers.append("Set-Cookie", consent.setCookie);
+	return response;
 });
 
 app.post("/authorize", async (c) => {
-	// Validates form submission, extracts state, and generates Set-Cookie headers to skip approval dialog next time
-	const { state, headers } = await parseRedirectApproval(c.req.raw, (c.env as any).COOKIE_ENCRYPTION_KEY);
-	if (!state.oauthReqInfo) {
-		return c.text("Invalid request", 400);
-	}
-
-	return redirectToGithub(c.req.raw, state.oauthReqInfo, c.env, headers);
+	const consent = await consumeConsent(c.req.raw, c.env.OAUTH_STATE, c.env.COOKIE_ENCRYPTION_KEY);
+	if (!consent) return c.text("Invalid or expired consent", 400);
+	return redirectToGithub(c.req.raw, consent.oauthReqInfo, c.env, consent.setCookies);
 });
 
-async function redirectToGithub(
-	request: Request,
-	oauthReqInfo: AuthRequest,
-	env: Env,
-	headers: Record<string, string> = {},
-) {
+async function redirectToGithub(request: Request, oauthReqInfo: AuthRequest, env: ExtendedEnv, setCookies: string[] = []) {
+	const upstreamState = await createUpstreamState(env.OAUTH_STATE, oauthReqInfo);
+	const headers = new Headers({
+		location: getUpstreamAuthorizeUrl({
+			client_id: env.GITHUB_CLIENT_ID,
+			redirect_uri: new URL("/callback", request.url).href,
+			scope: "read:user",
+			state: upstreamState.state,
+			upstream_url: "https://github.com/login/oauth/authorize",
+		}),
+	});
+	for (const cookie of [...setCookies, upstreamState.setCookie]) headers.append("Set-Cookie", cookie);
 	return new Response(null, {
-		headers: {
-			...headers,
-			location: getUpstreamAuthorizeUrl({
-				client_id: (env as any).GITHUB_CLIENT_ID,
-				redirect_uri: new URL("/callback", request.url).href,
-				scope: "read:user",
-				state: btoa(JSON.stringify(oauthReqInfo)),
-				upstream_url: "https://github.com/login/oauth/authorize",
-			}),
-		},
+		headers,
 		status: 302,
 	});
 }
@@ -71,26 +93,33 @@ async function redirectToGithub(
  * OAuth Callback Endpoint
  *
  * This route handles the callback from GitHub after user authentication.
- * It exchanges the temporary code for an access token, then stores some
- * user metadata & the auth token as part of the 'props' on the token passed
- * down to the client. It ends by redirecting the client back to _its_ callback URL
+ * It exchanges the temporary code for an access token, uses that credential
+ * transiently to load the GitHub identity, then stores only minimal user metadata
+ * in the client token props. It ends by redirecting the client back to _its_ callback URL.
  */
 app.get("/callback", async (c) => {
-	// Get the oathReqInfo out of KV
-	const oauthReqInfo = JSON.parse(atob(c.req.query("state") as string)) as AuthRequest;
-	if (!oauthReqInfo.clientId) {
-		return c.text("Invalid state", 400);
+	const flow = await consumeUpstreamState(c.req.raw, c.env.OAUTH_STATE, c.req.query("state") ?? "");
+	if (!flow) return c.text("Invalid or expired state", 400);
+	if (c.req.query("error")) {
+		return new Response("GitHub authorization was not completed", {
+			status: 400,
+			headers: { "Set-Cookie": flow.clearCookie },
+		});
 	}
+	const { oauthReqInfo } = flow;
 
 	// Exchange the code for an access token
 	const [accessToken, errResponse] = await fetchUpstreamAuthToken({
-		client_id: (c.env as any).GITHUB_CLIENT_ID,
-		client_secret: (c.env as any).GITHUB_CLIENT_SECRET,
+		client_id: c.env.GITHUB_CLIENT_ID,
+		client_secret: c.env.GITHUB_CLIENT_SECRET,
 		code: c.req.query("code"),
 		redirect_uri: new URL("/callback", c.req.url).href,
 		upstream_url: "https://github.com/login/oauth/access_token",
 	});
-	if (errResponse) return errResponse;
+	if (errResponse) {
+		errResponse.headers.append("Set-Cookie", flow.clearCookie);
+		return errResponse;
+	}
 
 	// Fetch the user info from GitHub
 	const user = await new Octokit({ auth: accessToken }).rest.users.getAuthenticated();
@@ -101,19 +130,22 @@ app.get("/callback", async (c) => {
 		metadata: {
 			label: name,
 		},
-		// This will be available on this.props inside MyMCP
+		// These minimal identity props are available through getMcpAuthContext().
 		props: {
-			accessToken,
-			email,
+			email: email ?? undefined,
 			login,
-			name,
+			name: name ?? login,
+			permissions: permissionsForGitHubLogin(login, c.env.DATABASE_WRITE_GITHUB_LOGINS),
 		} as Props,
 		request: oauthReqInfo,
 		scope: oauthReqInfo.scope,
 		userId: login,
 	});
 
-	return Response.redirect(redirectTo);
+	return new Response(null, {
+		status: 302,
+		headers: { Location: redirectTo, "Set-Cookie": flow.clearCookie },
+	});
 });
 
 export { app as GitHubHandler };

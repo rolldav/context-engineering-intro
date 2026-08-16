@@ -10,11 +10,11 @@ export const mockSuccessResponse: McpResponse = {
 }
 
 export const mockErrorResponse: McpResponse = {
+  isError: true,
   content: [
     {
       type: 'text',
       text: '**Error**\n\nSomething went wrong',
-      isError: true,
     },
   ],
 }

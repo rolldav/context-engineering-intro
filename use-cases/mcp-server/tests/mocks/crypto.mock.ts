@@ -40,7 +40,7 @@ export function resetCryptoMocks() {
 }
 
 // Apply mocks to global crypto object
-if (!global.crypto) {
+if (!(globalThis as any).crypto) {
   Object.defineProperty(global, 'crypto', {
     value: {
       subtle: mockCryptoSubtle,
@@ -49,6 +49,6 @@ if (!global.crypto) {
     writable: true,
   })
 } else {
-  global.crypto.subtle = mockCryptoSubtle
-  global.crypto.getRandomValues = mockGetRandomValues
+  ;(globalThis as any).crypto.subtle = mockCryptoSubtle
+  ;(globalThis as any).crypto.getRandomValues = mockGetRandomValues
 }

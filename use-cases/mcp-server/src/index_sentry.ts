@@ -1,68 +1,58 @@
 import * as Sentry from "@sentry/cloudflare";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpAgent } from "agents/mcp";
-import { Props } from "./types";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
+import { registerDatabaseToolsWithSentry } from "../examples/database-tools-sentry";
 import { GitHubHandler } from "./auth/github-handler";
-import { closeDb } from "./database/connection";
-//@ts-ignore
-import { registerDatabaseToolsWithSentry } from "./tools/database-tools-sentry";
+import { PropsSchema, type ExtendedEnv } from "./types";
 
-// Sentry configuration helper
-function getSentryConfig(env: Env) {
-	return {
-		// You can disable Sentry by setting SENTRY_DSN to a falsey-value
-		dsn: (env as any).SENTRY_DSN,
-		// A sample rate of 1.0 means "capture all traces"
-		tracesSampleRate: 1,
-	};
-}
+export { OAuthStateStore } from "./durable-objects/oauth-state-store";
 
-export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
-	server = new McpServer({
-		name: "PostgreSQL Database MCP Server",
-		version: "1.0.0",
-	});
-
-	/**
-	 * Cleanup database connections when Durable Object is shutting down
-	 */
-	async cleanup(): Promise<void> {
-		try {
-			await closeDb();
-			console.log('Database connections closed successfully');
-		} catch (error) {
-			console.error('Error during database cleanup:', error);
-		}
-	}
-
-	/**
-	 * Durable Objects alarm handler - used for cleanup
-	 */
-	async alarm(): Promise<void> {
-		await this.cleanup();
-	}
-
-	async init() {
-		// Initialize Sentry
-		const sentryConfig = getSentryConfig(this.env);
-		if (sentryConfig.dsn) {
-			// @ts-ignore - Sentry.init exists but types may not be complete
-			Sentry.init(sentryConfig);
+const SentryMcpApiHandler = {
+	async fetch(request: Request, env: ExtendedEnv, ctx: ExecutionContext): Promise<Response> {
+		const result = PropsSchema.safeParse(ctx.props);
+		if (!result.success) {
+			return new Response("Unauthorized", {
+				headers: { "cache-control": "no-store" },
+				status: 401,
+			});
 		}
 
-		// Register all tools with Sentry instrumentation
-		registerDatabaseToolsWithSentry(this.server, this.env, this.props);
-	}
-}
+		const handler = createMcpHandler(
+			() => {
+				const authenticated = PropsSchema.safeParse(getMcpAuthContext()?.props);
+				if (!authenticated.success) throw new TypeError("Missing authenticated MCP application props");
+				const server = new McpServer({
+					name: "PostgreSQL Database MCP Server",
+					version: "1.0.0",
+				});
+				registerDatabaseToolsWithSentry(server, env, authenticated.data);
+				return server;
+			},
+			{
+				legacy: "stateless",
+				route: "/mcp",
+			},
+		);
 
-export default new OAuthProvider({
-	apiHandlers: {
-		'/sse': MyMCP.serveSSE('/sse') as any,
-		'/mcp': MyMCP.serve('/mcp') as any,
+		return handler(request, env, ctx);
 	},
+};
+
+const provider = new OAuthProvider<ExtendedEnv>({
+	apiHandler: SentryMcpApiHandler,
+	apiRoute: "/mcp",
 	authorizeEndpoint: "/authorize",
 	clientRegistrationEndpoint: "/register",
-	defaultHandler: GitHubHandler as any,
+	defaultHandler: GitHubHandler,
+	scopesSupported: ["mcp"],
 	tokenEndpoint: "/token",
 });
+
+export default Sentry.withSentry<ExtendedEnv>(
+	(env) => ({
+		dsn: env.SENTRY_DSN,
+		tracesSampleRate: 1,
+	}),
+	provider,
+);

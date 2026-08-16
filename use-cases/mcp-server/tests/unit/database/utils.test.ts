@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const mockDbInstance = {
   unsafe: vi.fn(),
   end: vi.fn(),
+  begin: vi.fn(async (_mode: string, operation: Function) => operation(mockDbInstance)),
 }
 
 vi.mock('../../../src/database/connection', () => ({
@@ -11,7 +12,7 @@ vi.mock('../../../src/database/connection', () => ({
 }))
 
 // Now import the modules
-import { withDatabase } from '../../../src/database/utils'
+import { withDatabase, withReadOnlyDatabase } from '../../../src/database/utils'
 
 describe('Database Utils', () => {
   beforeEach(() => {
@@ -46,16 +47,17 @@ describe('Database Utils', () => {
       consoleSpy.mockRestore()
     })
 
-    it('should log failed operations', async () => {
+    it('should never log raw database operation errors', async () => {
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const mockOperation = vi.fn().mockRejectedValue(new Error('Operation failed'))
+      const mockOperation = vi.fn().mockRejectedValue(Object.assign(new Error('secret-message'), {
+        detail: 'secret-detail',
+        query: 'SELECT secret',
+        parameters: ['secret-parameter'],
+      }))
       
-      await expect(withDatabase('test-url', mockOperation)).rejects.toThrow('Operation failed')
+      await expect(withDatabase('test-url', mockOperation)).rejects.toThrow('secret-message')
       
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringMatching(/Database operation failed after \d+ms:/),
-        expect.any(Error)
-      )
+      expect(consoleSpy).not.toHaveBeenCalled()
       consoleSpy.mockRestore()
     })
 
@@ -73,6 +75,17 @@ describe('Database Utils', () => {
         expect.stringMatching(/Database operation completed successfully in \d+ms/)
       )
       consoleSpy.mockRestore()
+    })
+  })
+
+  describe('withReadOnlyDatabase', () => {
+    it('requires a dedicated URL and opens a PostgreSQL read-only transaction', async () => {
+      const operation = vi.fn().mockResolvedValue('read result')
+
+      await expect(withReadOnlyDatabase('', operation)).rejects.toThrow('READ_ONLY_DATABASE_URL is required')
+      await expect(withReadOnlyDatabase('readonly-url', operation)).resolves.toBe('read result')
+      expect(mockDbInstance.begin).toHaveBeenCalledWith('read only', expect.any(Function))
+      expect(operation).toHaveBeenCalledWith(mockDbInstance)
     })
   })
 })
