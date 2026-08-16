@@ -9,7 +9,7 @@ describe('Response Helpers', () => {
       expect(response.content).toHaveLength(1)
       expect(response.content[0].type).toBe('text')
       expect(response.content[0].text).toBe('**Success**\n\nOperation completed')
-      expect(response.content[0].isError).toBeUndefined()
+      expect(response.isError).toBeUndefined()
     })
 
     it('should create success response with message and data', () => {
@@ -69,7 +69,7 @@ describe('Response Helpers', () => {
       expect(response.content).toHaveLength(1)
       expect(response.content[0].type).toBe('text')
       expect(response.content[0].text).toBe('**Error**\n\nSomething went wrong')
-      expect(response.content[0].isError).toBe(true)
+      expect(response.isError).toBe(true)
     })
 
     it('should create error response with message and details', () => {
@@ -82,7 +82,7 @@ describe('Response Helpers', () => {
       expect(response.content[0].text).toContain('Validation failed')
       expect(response.content[0].text).toContain('**Details:**')
       expect(response.content[0].text).toContain(JSON.stringify(details, null, 2))
-      expect(response.content[0].isError).toBe(true)
+      expect(response.isError).toBe(true)
     })
 
     it('should handle null details', () => {
@@ -108,7 +108,7 @@ describe('Response Helpers', () => {
       expect(response.content[0].text).toContain('**Error**')
       expect(response.content[0].text).toContain('Database error')
       expect(response.content[0].text).toContain('**Details:**')
-      expect(response.content[0].isError).toBe(true)
+      expect(response.isError).toBe(true)
     })
 
     it('should handle complex error details', () => {
@@ -124,7 +124,7 @@ describe('Response Helpers', () => {
       expect(response.content[0].text).toContain('AUTHENTICATION_FAILED')
       expect(response.content[0].text).toContain('Invalid credentials')
       expect(response.content[0].text).toContain('attempts')
-      expect(response.content[0].isError).toBe(true)
+      expect(response.isError).toBe(true)
     })
   })
 
@@ -148,8 +148,8 @@ describe('Response Helpers', () => {
       const successResponse = createSuccessResponse('Success message')
       const errorResponse = createErrorResponse('Error message')
       
-      expect(successResponse.content[0].isError).toBeUndefined()
-      expect(errorResponse.content[0].isError).toBe(true)
+      expect(successResponse.isError).toBeUndefined()
+      expect(errorResponse.isError).toBe(true)
     })
   })
 })

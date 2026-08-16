@@ -1,16 +1,37 @@
 import { z } from "zod";
-import type { AuthRequest, OAuthHelpers, ClientInfo } from "@cloudflare/workers-oauth-provider";
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import type { OAuthStateStore } from "./durable-objects/oauth-state-store";
 
-// User context passed through OAuth
-export type Props = {
-  login: string;
-  name: string;
-  email: string;
-  accessToken: string;
-};
+export const PermissionSchema = z.enum(["database:write"]);
+export const PropsSchema = z
+  .object({
+    login: z.string().min(1),
+    name: z.string().min(1),
+    email: z.string().email().optional(),
+    permissions: z.array(PermissionSchema).default([]),
+  })
+  .strict();
+
+// Trusted application context encrypted into the OAuth access token.
+export type Props = z.infer<typeof PropsSchema>;
+
+export function canWriteDatabase(props: Props): boolean {
+  return props.permissions.includes("database:write");
+}
 
 // Extended environment with OAuth provider
-export type ExtendedEnv = Env & { OAUTH_PROVIDER: OAuthHelpers };
+export type ExtendedEnv = Env & {
+  OAUTH_PROVIDER: OAuthHelpers;
+  OAUTH_KV: KVNamespace;
+  OAUTH_STATE: DurableObjectNamespace<OAuthStateStore>;
+  GITHUB_CLIENT_ID: string;
+  GITHUB_CLIENT_SECRET: string;
+  DATABASE_WRITE_GITHUB_LOGINS?: string;
+  COOKIE_ENCRYPTION_KEY: string;
+  DATABASE_URL: string;
+  READ_ONLY_DATABASE_URL: string;
+  SENTRY_DSN?: string;
+};
 
 // OAuth URL construction parameters
 export interface UpstreamAuthorizeParams {
@@ -30,54 +51,26 @@ export interface UpstreamTokenParams {
   client_id: string;
 }
 
-// Approval dialog configuration
-export interface ApprovalDialogOptions {
-  client: ClientInfo | null;
-  server: {
-    name: string;
-    logo?: string;
-    description?: string;
-  };
-  state: Record<string, any>;
-  cookieName?: string;
-  cookieSecret?: string | Uint8Array;
-  cookieDomain?: string;
-  cookiePath?: string;
-  cookieMaxAge?: number;
-}
-
-// Result of parsing approval form
-export interface ParsedApprovalResult {
-  state: any;
-  headers: Record<string, string>;
-}
-
 // MCP tool schemas using Zod
-export const ListTablesSchema = {};
+export const ListTablesSchema = z.object({});
 
-export const QueryDatabaseSchema = {
-  sql: z
-    .string()
-    .min(1, "SQL query cannot be empty")
-    .describe("SQL query to execute (SELECT queries only)"),
-};
+export const QueryDatabaseSchema = z.object({
+  sql: z.string().min(1, "SQL query cannot be empty").describe("SQL query to execute (SELECT queries only)"),
+});
 
-export const ExecuteDatabaseSchema = {
-  sql: z
-    .string()
-    .min(1, "SQL command cannot be empty")
-    .describe("SQL command to execute (INSERT, UPDATE, DELETE, CREATE, etc.)"),
-};
+export const ExecuteDatabaseSchema = z.object({
+  sql: z.string().min(1, "SQL command cannot be empty").describe("SQL command to execute (INSERT, UPDATE, DELETE, CREATE, etc.)"),
+});
 
 // MCP response types
 export interface McpTextContent {
   type: "text";
   text: string;
-  isError?: boolean;
 }
 
 export interface McpResponse {
   content: McpTextContent[];
+  isError?: boolean;
 }
 
 // Standard response creators
@@ -87,10 +80,12 @@ export function createSuccessResponse(message: string, data?: any): McpResponse 
     text += `\n\n**Result:**\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\``;
   }
   return {
-    content: [{
-      type: "text",
-      text,
-    }],
+    content: [
+      {
+        type: "text",
+        text,
+      },
+    ],
   };
 }
 
@@ -100,11 +95,13 @@ export function createErrorResponse(message: string, details?: any): McpResponse
     text += `\n\n**Details:**\n\`\`\`json\n${JSON.stringify(details, null, 2)}\n\`\`\``;
   }
   return {
-    content: [{
-      type: "text",
-      text,
-      isError: true,
-    }],
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text,
+      },
+    ],
   };
 }
 
@@ -123,4 +120,4 @@ export interface SqlValidationResult {
 }
 
 // Re-export external types that are used throughout
-export type { AuthRequest, OAuthHelpers, ClientInfo };
+export type { OAuthHelpers };

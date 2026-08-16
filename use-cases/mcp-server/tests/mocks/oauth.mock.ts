@@ -43,5 +43,6 @@ export const mockEnv = {
   GITHUB_CLIENT_SECRET: 'test-client-secret',
   COOKIE_ENCRYPTION_KEY: 'test-encryption-key',
   DATABASE_URL: 'postgresql://test:test@localhost:5432/test',
+  READ_ONLY_DATABASE_URL: 'postgresql://readonly:test@localhost:5432/test',
   OAUTH_PROVIDER: mockOAuthProvider,
 }

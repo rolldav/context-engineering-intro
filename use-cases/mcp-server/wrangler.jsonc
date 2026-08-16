@@ -6,23 +6,23 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "my-mcp-server",
 	"main": "src/index.ts",
-	"compatibility_date": "2025-03-10",
-	"compatibility_flags": [
-		"nodejs_compat"
-	],
+	"compatibility_date": "2026-08-14",
+	"compatibility_flags": ["nodejs_compat"],
 	"migrations": [
 		{
-			"new_sqlite_classes": [
-				"MyMCP"
-			],
+			"new_sqlite_classes": ["MyMCP"],
 			"tag": "v1"
+		},
+		{
+			"new_sqlite_classes": ["OAuthStateStore"],
+			"tag": "v2"
 		}
 	],
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "MyMCP",
-				"name": "MCP_OBJECT"
+				"class_name": "OAuthStateStore",
+				"name": "OAUTH_STATE"
 			}
 		]
 	},

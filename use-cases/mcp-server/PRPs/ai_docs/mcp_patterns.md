@@ -1,491 +1,164 @@
 # MCP Server Development Patterns
 
-This document contains proven patterns for developing Model Context Protocol (MCP) servers using TypeScript and Cloudflare Workers, based on the implementation in this codebase.
+This project uses the Cloudflare Agents SDK stateless MCP handler and MCP SDK v2. Do not copy the deprecated `McpAgent`, Durable Object transport, `server.tool()`, or `/sse` patterns into new work.
 
-## Core MCP Server Architecture
+## Required versions and imports
 
-### Base Server Class Pattern
+Pin the versions required by the installed Agents release:
 
-```typescript
-import { McpAgent } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-
-// Authentication props from OAuth flow
-type Props = {
-  login: string;
-  name: string;
-  email: string;
-  accessToken: string;
-};
-
-export class CustomMCP extends McpAgent<Env, Record<string, never>, Props> {
-  server = new McpServer({
-    name: "Your MCP Server Name",
-    version: "1.0.0",
-  });
-
-  // CRITICAL: Implement cleanup for Durable Objects
-  async cleanup(): Promise<void> {
-    try {
-      // Close database connections
-      await closeDb();
-      console.log('Database connections closed successfully');
-    } catch (error) {
-      console.error('Error during database cleanup:', error);
-    }
-  }
-
-  // CRITICAL: Durable Objects alarm handler
-  async alarm(): Promise<void> {
-    await this.cleanup();
-  }
-
-  // Initialize all tools and resources
-  async init() {
-    // Register tools here
-    this.registerTools();
-    
-    // Register resources if needed
-    this.registerResources();
-  }
-
-  private registerTools() {
-    // Tool registration logic
-  }
-
-  private registerResources() {
-    // Resource registration logic
-  }
+```json
+{
+  "agents": "0.20.1",
+  "@modelcontextprotocol/client": "2.0.0",
+  "@modelcontextprotocol/sdk": "1.30.0",
+  "@modelcontextprotocol/server": "2.0.0",
+  "zod": "4.4.3"
 }
 ```
 
-### Tool Registration Pattern
+`@modelcontextprotocol/sdk` 1.30.0 remains an exact peer of Agents 0.20.1, but Worker server code imports `McpServer` from `@modelcontextprotocol/server`.
 
-```typescript
-// Basic tool registration
-this.server.tool(
-  "toolName",
-  "Tool description for the LLM",
-  {
-    param1: z.string().describe("Parameter description"),
-    param2: z.number().optional().describe("Optional parameter"),
-  },
-  async ({ param1, param2 }) => {
-    try {
-      // Tool implementation
-      const result = await performOperation(param1, param2);
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Success: ${JSON.stringify(result, null, 2)}`
-          }
-        ]
-      };
-    } catch (error) {
-      console.error('Tool error:', error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error: ${error.message}`,
-            isError: true
-          }
-        ]
-      };
-    }
-  }
-);
-```
-
-### Conditional Tool Registration (Based on Permissions)
-
-```typescript
-// Permission-based tool availability
-const ALLOWED_USERNAMES = new Set<string>([
-  'admin1',
-  'admin2'
-]);
-
-// Register privileged tools only for authorized users
-if (ALLOWED_USERNAMES.has(this.props.login)) {
-  this.server.tool(
-    "privilegedTool",
-    "Tool only available to authorized users",
-    { /* parameters */ },
-    async (params) => {
-      // Privileged operation
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Privileged operation executed by: ${this.props.login}`
-          }
-        ]
-      };
-    }
-  );
-}
-```
-
-## Database Integration Patterns
-
-### Database Connection Pattern
-
-```typescript
-import { withDatabase, validateSqlQuery, isWriteOperation, formatDatabaseError } from "./database";
-
-// Database operation with connection management
-async function performDatabaseOperation(sql: string) {
-  try {
-    // Validate SQL query
-    const validation = validateSqlQuery(sql);
-    if (!validation.isValid) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Invalid SQL query: ${validation.error}`,
-            isError: true
-          }
-        ]
-      };
-    }
-
-    // Execute with automatic connection management
-    return await withDatabase(this.env.DATABASE_URL, async (db) => {
-      const results = await db.unsafe(sql);
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: `**Query Results**\n\`\`\`sql\n${sql}\n\`\`\`\n\n**Results:**\n\`\`\`json\n${JSON.stringify(results, null, 2)}\n\`\`\`\n\n**Rows returned:** ${Array.isArray(results) ? results.length : 1}`
-          }
-        ]
-      };
-    });
-  } catch (error) {
-    console.error('Database operation error:', error);
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Database error: ${formatDatabaseError(error)}`,
-          isError: true
-        }
-      ]
-    };
-  }
-}
-```
-
-### Read vs Write Operation Handling
-
-```typescript
-// Check if operation is read-only
-if (isWriteOperation(sql)) {
-  return {
-    content: [
-      {
-        type: "text",
-        text: "Write operations are not allowed with this tool. Use the privileged tool if you have write permissions.",
-        isError: true
-      }
-    ]
-  };
-}
-```
-
-## Authentication & Authorization Patterns
-
-### OAuth Integration Pattern
+## Stateless authenticated server
 
 ```typescript
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
-import { GitHubHandler } from "./github-handler";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
+import { z } from "zod";
 
-// OAuth configuration
-export default new OAuthProvider({
-  apiHandlers: {
-    '/sse': MyMCP.serveSSE('/sse') as any,
-    '/mcp': MyMCP.serve('/mcp') as any,
+const PropsSchema = z.object({
+  login: z.string().min(1),
+  name: z.string().min(1),
+  email: z.string().email().optional(),
+}).strict();
+
+function createServer(env: Env, props: Props) {
+  const server = new McpServer({ name: "Example", version: "1.0.0" });
+  registerAllTools(server, env, props);
+  return server;
+}
+
+const apiHandler = {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const parsed = PropsSchema.safeParse(ctx.props);
+    if (!parsed.success) {
+      return new Response("Unauthorized", {
+        status: 401,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+
+    return createMcpHandler(() => {
+      const authenticated = PropsSchema.parse(getMcpAuthContext()?.props);
+      return createServer(env, authenticated);
+    }, {
+      legacy: "stateless",
+      route: "/mcp",
+    })(request, env, ctx);
   },
+};
+
+export default new OAuthProvider({
+  apiRoute: "/mcp",
+  apiHandler,
   authorizeEndpoint: "/authorize",
   clientRegistrationEndpoint: "/register",
-  defaultHandler: GitHubHandler as any,
+  defaultHandler: GitHubHandler,
+  scopesSupported: ["mcp"],
   tokenEndpoint: "/token",
 });
 ```
 
-### User Permission Checking
+The OAuth provider validates bearer tokens and passes decrypted claims through `ExecutionContext.props`. Validate `ctx.props` before invoking `createMcpHandler`; only read `getMcpAuthContext()` inside its factory, after ALS is established. Create a fresh server per request. Never log tokens, claims, raw SQL, or query results.
+
+## Tool registration
 
 ```typescript
-// Permission validation pattern
-function hasPermission(username: string, operation: string): boolean {
-  const WRITE_PERMISSIONS = new Set(['admin1', 'admin2']);
-  const READ_PERMISSIONS = new Set(['user1', 'user2', ...WRITE_PERMISSIONS]);
-  
-  switch (operation) {
-    case 'read':
-      return READ_PERMISSIONS.has(username);
-    case 'write':
-      return WRITE_PERMISSIONS.has(username);
-    default:
-      return false;
-  }
-}
-```
+import type { McpServer } from "@modelcontextprotocol/server";
+import { z } from "zod";
 
-## Error Handling Patterns
-
-### Standardized Error Response
-
-```typescript
-// Error response pattern
-function createErrorResponse(error: Error, operation: string) {
-  console.error(`${operation} error:`, error);
-  
-  return {
-    content: [
-      {
-        type: "text",
-        text: `${operation} failed: ${error.message}`,
-        isError: true
-      }
-    ]
-  };
-}
-```
-
-### Database Error Formatting
-
-```typescript
-// Use the built-in database error formatter
-import { formatDatabaseError } from "./database";
-
-try {
-  // Database operation
-} catch (error) {
-  return {
-    content: [
-      {
-        type: "text",
-        text: `Database error: ${formatDatabaseError(error)}`,
-        isError: true
-      }
-    ]
-  };
-}
-```
-
-## Resource Registration Patterns
-
-### Basic Resource Pattern
-
-```typescript
-// Resource registration
-this.server.resource(
-  "resource://example/{id}",
-  "Resource description",
-  async (uri) => {
-    const id = uri.path.split('/').pop();
-    
-    try {
-      const data = await fetchResourceData(id);
-      
-      return {
-        contents: [
-          {
-            uri: uri.href,
-            mimeType: "application/json",
-            text: JSON.stringify(data, null, 2)
-          }
-        ]
-      };
-    } catch (error) {
-      throw new Error(`Failed to fetch resource: ${error.message}`);
-    }
-  }
-);
-```
-
-## Testing Patterns
-
-### Tool Testing Pattern
-
-```typescript
-// Test tool functionality
-async function testTool(toolName: string, params: any) {
-  try {
-    const result = await server.callTool(toolName, params);
-    console.log(`${toolName} test passed:`, result);
-    return true;
-  } catch (error) {
-    console.error(`${toolName} test failed:`, error);
-    return false;
-  }
-}
-```
-
-### Database Connection Testing
-
-```typescript
-// Test database connectivity
-async function testDatabaseConnection() {
-  try {
-    await withDatabase(process.env.DATABASE_URL, async (db) => {
-      const result = await db`SELECT 1 as test`;
-      console.log('Database connection test passed:', result);
-    });
-    return true;
-  } catch (error) {
-    console.error('Database connection test failed:', error);
-    return false;
-  }
-}
-```
-
-## Security Best Practices
-
-### Input Validation
-
-```typescript
-// Always validate inputs with Zod
-const inputSchema = z.object({
-  query: z.string().min(1).max(1000),
-  parameters: z.array(z.string()).optional()
+const QuerySchema = z.object({
+  sql: z.string().min(1).describe("A read-only SQL query"),
 });
 
-// In tool handler
-try {
-  const validated = inputSchema.parse(params);
-  // Use validated data
-} catch (error) {
-  return createErrorResponse(error, "Input validation");
-}
-```
-
-### SQL Injection Prevention
-
-```typescript
-// Use the built-in SQL validation
-import { validateSqlQuery } from "./database";
-
-const validation = validateSqlQuery(sql);
-if (!validation.isValid) {
-  return createErrorResponse(new Error(validation.error), "SQL validation");
-}
-```
-
-### Access Control
-
-```typescript
-// Always check permissions before executing sensitive operations
-if (!hasPermission(this.props.login, 'write')) {
-  return {
-    content: [
-      {
-        type: "text",
-        text: "Access denied: insufficient permissions",
-        isError: true
+export function registerDatabaseTools(server: McpServer, env: Env, props: Props): void {
+  server.registerTool(
+    "queryDatabase",
+    {
+      description: "Run a validated read-only SQL query.",
+      inputSchema: QuerySchema,
+    },
+    async ({ sql }) => {
+      const validation = validateReadOnlySqlQuery(sql);
+      if (!validation.isValid) {
+        return createErrorResponse("Write operations are not allowed");
       }
-    ]
-  };
-}
-```
+      return withReadOnlyDatabase(env.READ_ONLY_DATABASE_URL, async (db) => ({
+        content: [{ type: "text", text: JSON.stringify(await db.unsafe(sql)) }],
+      }));
+    },
+  );
 
-## Performance Patterns
-
-### Connection Pooling
-
-```typescript
-// Use the built-in connection pooling
-import { withDatabase } from "./database";
-
-// The withDatabase function handles connection pooling automatically
-await withDatabase(databaseUrl, async (db) => {
-  // Database operations
-});
-```
-
-### Resource Cleanup
-
-```typescript
-// Implement proper cleanup in Durable Objects
-async cleanup(): Promise<void> {
-  try {
-    // Close database connections
-    await closeDb();
-    
-    // Clean up other resources
-    await cleanupResources();
-    
-    console.log('Cleanup completed successfully');
-  } catch (error) {
-    console.error('Cleanup error:', error);
+  if (props.permissions.includes("database:write")) {
+    server.registerTool(
+      "executeDatabase",
+      { description: "Run a validated privileged SQL statement.", inputSchema: QuerySchema },
+      async ({ sql }) => executePrivilegedSql(env, props, sql),
+    );
   }
 }
 ```
 
-## Common Gotchas
+Pass `env` and validated `props` through function arguments. Do not store request-scoped identity in module globals.
 
-### 1. Missing Cleanup Implementation
-- Always implement `cleanup()` method in Durable Objects
-- Handle database connection cleanup properly
-- Set up alarm handler for automatic cleanup
+`READ_ONLY_DATABASE_URL` is mandatory for list/query tools and must identify a PostgreSQL read-only role. Queries also run in a `READ ONLY` transaction. `DATABASE_URL` is reserved for an explicitly authorized destructive tool. The `database:write` claim is issued only from deployment-owned policy and is rechecked inside the destructive handler. Missing configuration is read-only. Require the `mcp` OAuth scope; do not accept an empty scope.
 
-### 2. SQL Injection Vulnerabilities
-- Always use `validateSqlQuery()` before executing SQL
-- Never concatenate user input directly into SQL strings
-- Use parameterized queries when possible
+## OAuth state and credentials
 
-### 3. Permission Bypasses
-- Check permissions for every sensitive operation
-- Don't rely on tool registration alone for security
-- Always validate user identity from props
+- `OAUTH_KV` is retained for provider grants and tokens.
+- Application consent and upstream state live only in the `OAUTH_STATE` SQLite Durable Object.
+- Each state value is opaque, bound to a distinct signed `__Host` cookie, expires after 600 seconds, and is atomically consumed once.
+- GitHub access tokens are transient. Use them only to fetch identity; never persist them in `Props`.
+- `Props` contains minimal identity metadata only.
 
-### 4. Error Information Leakage
-- Use `formatDatabaseError()` to sanitize error messages
-- Don't expose internal system details in error responses
-- Log detailed errors server-side, return generic messages to client
+## Wrangler migrations
 
-### 5. Resource Leaks
-- Always use `withDatabase()` for database operations
-- Implement proper error handling in async operations
-- Clean up resources in finally blocks
+The historical migration must remain even after the legacy MCP Durable Object binding is removed:
 
-## Environment Configuration
-
-### Required Environment Variables
-
-```typescript
-// Environment type definition
-interface Env {
-  DATABASE_URL: string;
-  GITHUB_CLIENT_ID: string;
-  GITHUB_CLIENT_SECRET: string;
-  OAUTH_KV: KVNamespace;
-  // Add other bindings as needed
+```jsonc
+"migrations": [
+  { "tag": "v1", "new_sqlite_classes": ["MyMCP"] },
+  { "tag": "v2", "new_sqlite_classes": ["OAuthStateStore"] }
+],
+"durable_objects": {
+  "bindings": [
+    { "name": "OAUTH_STATE", "class_name": "OAuthStateStore" }
+  ]
 }
 ```
 
-### Wrangler Configuration Pattern
+Do not add `deleted_classes` merely because the binding disappeared: the v1 migration is deployment history and must remain intact for a local-only migration plan.
 
-```toml
-# wrangler.toml
-name = "mcp-server"
-main = "src/index.ts"
-compatibility_date = "2024-01-01"
+## Transport contract
 
-[[kv_namespaces]]
-binding = "OAUTH_KV"
-id = "your-kv-namespace-id"
+- `/mcp` is the only protected protocol endpoint.
+- It uses Streamable HTTP through `createMcpHandler`.
+- The handler retains stateless compatibility for supported 2025 clients.
+- `/sse` is not served. SSE was the legacy HTTP+SSE transport and is deprecated.
 
-[env.production]
-# Production-specific configuration
+## Validation gates
+
+Run all of these before claiming completion:
+
+```bash
+npm ci
+npm ls --all
+npm audit
+npm run type-check
+npm run test:run
+npm run cf-typegen -- --check
+npx wrangler deploy --dry-run
+git diff --check
 ```
 
-This document provides the core patterns for building secure, scalable MCP servers using the proven architecture in this codebase.
+Tests must discriminate at least: unauthenticated 401, `tools/list`, `tools/call`, regular versus privileged tool visibility, concurrent principal isolation, `/sse` absence, and unsupported HTTP methods.
